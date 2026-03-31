@@ -27,6 +27,11 @@ class ControlNotFoundError(UIAError):
     pass
 
 
+class TargetNotFoundError(ControlNotFoundError):
+    """Target chat not found in search results"""
+    pass
+
+
 class RegistryError(WeChatError):
     """Registry operation error"""
     pass

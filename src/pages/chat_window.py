@@ -1,15 +1,34 @@
 # -*- coding: utf-8 -*-
 """Chat window page for WeChat"""
+import hashlib
+import random
 import time
-from typing import List, Dict, Optional
+import uuid
 from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional
 
 from .base import BasePage
-from ..core.exceptions import ControlNotFoundError
-from ..config import SEARCH_TIMEOUT, OPERATION_INTERVAL
-from ..utils.logger import get_logger
+from ..core.exceptions import ControlNotFoundError, TargetNotFoundError
+from ..config import (
+    ALLOWED_GROUPS,
+    BATCH_SEND_INTERVAL_MAX,
+    BATCH_SEND_INTERVAL_MIN,
+    OPERATION_INTERVAL,
+    SEARCH_RETRY_COUNT,
+    SEARCH_RETRY_DELAY_MAX,
+    SEARCH_RETRY_DELAY_MIN,
+    SEARCH_TIMEOUT,
+    SEND_DEDUP_WINDOW_SECONDS,
+    SEND_JITTER_MAX,
+    SEND_JITTER_MIN,
+    SEND_RECONNECT_RETRY_COUNT,
+    SEND_RETRY_COUNT,
+)
+from ..utils.clipboard_utils import set_files_to_clipboard, set_text_to_clipboard
+from ..utils.logger import get_logger, log_send_audit
 
 logger = get_logger(__name__)
+VK_V = 0x56
 
 
 # Search result group names
@@ -30,6 +49,14 @@ class SearchResult:
     item_type: str  # 'contact', 'function', 'network'
     auto_id: str
     group: str
+
+
+@dataclass(frozen=True)
+class SendRequest:
+    """Normalized send request payload."""
+    target: str
+    message: str
+    target_type: str
 
 
 class ChatWindow(BasePage):
@@ -53,10 +80,227 @@ class ChatWindow(BasePage):
     def __init__(self, window):
         super().__init__(window)
         self._last_search_results: Dict[str, List[SearchResult]] = {}
+        self._run_id = str(uuid.uuid4())
+        self._recent_send_records: Dict[str, float] = {}
 
     # ==================== Private Methods ====================
 
-    def _get_search_edit(self, retries: int = 3):
+    def _sleep_with_jitter(self, minimum: float, maximum: float) -> float:
+        """Sleep for a random duration inside the given range."""
+        delay = random.uniform(minimum, maximum)
+        time.sleep(delay)
+        return delay
+
+    def _log_send_phase(
+        self,
+        target: str,
+        attempt: int,
+        phase: str,
+        success: bool,
+        started_at: float,
+        exception: Optional[Exception] = None,
+    ) -> None:
+        """Write structured send audit log."""
+        payload = {
+            "run_id": self._run_id,
+            "target": target,
+            "attempt": attempt,
+            "phase": phase,
+            "success": success,
+            "exception_type": type(exception).__name__ if exception else "",
+            "exception_msg": str(exception) if exception else "",
+            "elapsed_ms": int((time.time() - started_at) * 1000),
+        }
+        log_send_audit(payload)
+
+    def _normalize_target(self, target: str, target_type: str) -> str:
+        """Validate and normalize target."""
+        normalized_target = (target or "").strip()
+        if not normalized_target:
+            raise ValueError("target must not be empty")
+        if target_type == "group" and ALLOWED_GROUPS and normalized_target not in ALLOWED_GROUPS:
+            raise ValueError(
+                f"group '{normalized_target}' is not in WECHAT_ALLOWED_GROUPS"
+            )
+        return normalized_target
+
+    def _normalize_message(self, message: str) -> str:
+        """Validate and normalize message."""
+        normalized_message = (message or "").strip()
+        if not normalized_message:
+            raise ValueError("message must not be empty")
+        return normalized_message
+
+    def _normalize_send_args(
+        self, target: str, message: str, target_type: str
+    ) -> SendRequest:
+        """Validate and normalize send arguments."""
+        if target_type not in ("contact", "group"):
+            raise ValueError("target_type must be 'contact' or 'group'")
+
+        return SendRequest(
+            target=self._normalize_target(target, target_type),
+            message=self._normalize_message(message),
+            target_type=target_type,
+        )
+
+    def _make_send_record_key(self, target: str, message: str) -> str:
+        """Build deduplication key for a send operation."""
+        content_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+        return f"{target}:{content_hash}"
+
+    def _was_sent_recently(self, target: str, message: str) -> bool:
+        """Check whether the same content was sent recently."""
+        key = self._make_send_record_key(target, message)
+        sent_at = self._recent_send_records.get(key)
+        if not sent_at:
+            return False
+        return (time.time() - sent_at) <= SEND_DEDUP_WINDOW_SECONDS
+
+    def _remember_successful_send(self, target: str, message: str) -> None:
+        """Remember a successful send for duplicate suppression."""
+        now = time.time()
+        cutoff = now - SEND_DEDUP_WINDOW_SECONDS
+        self._recent_send_records = {
+            key: ts for key, ts in self._recent_send_records.items() if ts >= cutoff
+        }
+        self._recent_send_records[self._make_send_record_key(target, message)] = now
+
+    def _send_ctrl_hotkey(self, key_code: int) -> None:
+        """Press Ctrl+<key> once via Win32 for more stable text paste."""
+        import win32api
+        import win32con
+
+        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(key_code, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    def _rebuild_uia_session(self) -> bool:
+        """Reconnect UIA session and recover window focus."""
+        logger.warning("Rebuilding WeChat UIA session")
+        return self._window.refresh()
+
+    def _sleep_between_batch_targets(self) -> None:
+        """Sleep between batch targets to reduce UI contention."""
+        time.sleep(random.uniform(BATCH_SEND_INTERVAL_MIN, BATCH_SEND_INTERVAL_MAX))
+
+    def _sleep_before_send_attempt(self) -> None:
+        """Sleep briefly before each send attempt."""
+        self._sleep_with_jitter(SEND_JITTER_MIN, SEND_JITTER_MAX)
+
+    def _sleep_before_send_retry(self) -> None:
+        """Sleep briefly before retrying after a failed attempt."""
+        self._sleep_with_jitter(SEARCH_RETRY_DELAY_MIN, SEARCH_RETRY_DELAY_MAX)
+
+    def _find_target_result(
+        self, results: Dict[str, List[SearchResult]], target: str, target_type: str
+    ) -> Optional[SearchResult]:
+        """Find the matching search result for the target."""
+        primary_group = GROUP_CHATS if target_type == 'group' else GROUP_CONTACTS
+
+        for item in results.get(primary_group, []):
+            if target in item.name:
+                return item
+
+        if target_type == 'contact':
+            for item in results.get(GROUP_FUNCTIONS, []):
+                if target in item.name:
+                    return item
+
+        return None
+
+    def _prepare_chat_input_for_paste(self):
+        """Focus and clear the chat input before pasting content."""
+        chat_input = self._get_chat_input()
+        if not chat_input:
+            logger.error("Chat input not found")
+            return None
+
+        chat_input.Click()
+        time.sleep(OPERATION_INTERVAL)
+        chat_input.SendKeys('{Ctrl}a')
+        chat_input.SendKeys('{Delete}')
+        time.sleep(OPERATION_INTERVAL)
+        return chat_input
+
+    def _run_send_phase(
+        self,
+        request: SendRequest,
+        attempt: int,
+        phase: str,
+        action: Callable[[], bool],
+        error_message: str,
+    ) -> None:
+        """Execute one send phase and write audit logs."""
+        started_at = time.time()
+        try:
+            if not action():
+                raise ControlNotFoundError(error_message)
+        except Exception as exc:
+            self._log_send_phase(
+                request.target,
+                attempt,
+                phase,
+                False,
+                started_at,
+                exc,
+            )
+            raise
+
+        self._log_send_phase(request.target, attempt, phase, True, started_at)
+
+    def _send_once(self, request: SendRequest, attempt: int) -> bool:
+        """Run one full send attempt."""
+        self._sleep_before_send_attempt()
+
+        try:
+            self._run_send_phase(
+                request,
+                attempt,
+                "open",
+                lambda: self.open_chat(request.target, request.target_type),
+                "failed to open chat",
+            )
+            self._run_send_phase(
+                request,
+                attempt,
+                "send",
+                lambda: self.send_message(request.message),
+                "failed to send message",
+            )
+        except TargetNotFoundError as exc:
+            logger.warning(
+                f"Send aborted for '{request.target}' ({attempt}): {exc}"
+            )
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"Send attempt failed for '{request.target}' ({attempt}): {exc}"
+            )
+            return False
+
+        self._remember_successful_send(request.target, request.message)
+        return True
+
+    def _send_with_retry_range(
+        self, request: SendRequest, attempts: range
+    ) -> bool:
+        """Run a range of send attempts against the current UIA session."""
+        attempt_list = list(attempts)
+
+        for index, attempt in enumerate(attempt_list):
+            if self._send_once(request, attempt):
+                return True
+            if index < len(attempt_list) - 1:
+                self._sleep_before_send_retry()
+
+        return False
+
+    def _get_search_edit(self, retries: int = SEARCH_RETRY_COUNT):
         """Get main search box control (not the one in group detail panel)."""
 
         def find_edits(ctrl, results):
@@ -203,7 +447,7 @@ class ChatWindow(BasePage):
         Returns:
             bool: True if successful
         """
-        search_edit = self._get_search_edit(retries=3)
+        search_edit = self._get_search_edit(retries=SEARCH_RETRY_COUNT)
         if not search_edit:
             logger.error("Search box not found")
             return False
@@ -211,6 +455,7 @@ class ChatWindow(BasePage):
         search_edit.Click()
         time.sleep(OPERATION_INTERVAL)
         search_edit.SendKeys('{Ctrl}a')
+        search_edit.SendKeys('{Delete}')
         search_edit.SendKeys(keyword)
         time.sleep(1.5)  # Wait for results
 
@@ -259,6 +504,30 @@ class ChatWindow(BasePage):
 
         return results
 
+    def _open_chat_once(self, target: str, target_type: str = 'contact') -> bool:
+        """Single attempt to search and open a chat."""
+        group_name = GROUP_CHATS if target_type == 'group' else GROUP_CONTACTS
+        logger.info(f"Opening chat: {target} (type: {target_type})")
+
+        results = self.search(target)
+        target_result = self._find_target_result(results, target, target_type)
+
+        if not target_result:
+            self._clear_search()
+            raise TargetNotFoundError(f"'{target}' not found in '{group_name}' group")
+
+        logger.debug(f"Clicking: {target_result.name}")
+        target_result.ctrl.Click()
+        time.sleep(1)
+
+        chat_input = self._get_chat_input()
+        if not chat_input:
+            logger.error("Chat input not found after opening chat")
+            return False
+
+        logger.info(f"Chat opened: {target}")
+        return True
+
     def open_chat(self, target: str, target_type: str = 'contact') -> bool:
         """
         Search and open chat with target.
@@ -270,60 +539,23 @@ class ChatWindow(BasePage):
         Returns:
             bool: True if successful
         """
-        group_name = GROUP_CHATS if target_type == 'group' else GROUP_CONTACTS
-        logger.info(f"Opening chat: {target} (type: {target_type})")
+        for attempt in range(1, SEARCH_RETRY_COUNT + 1):
+            if self._open_chat_once(target, target_type):
+                return True
 
-        target_result = None
-
-        # Search with one retry to absorb transient UIA state (e.g. focus/panel glitch)
-        for attempt in range(1, 3):
-            results = self.search(target)
-
-            # Find in correct group
-            group_items = results.get(group_name, [])
-            target_result = None
-
-            for item in group_items:
-                if target in item.name:
-                    target_result = item
-                    break
-
-            # If not found in expected group, try FUNCTIONS group (for File Transfer Helper etc.)
-            if not target_result and target_type == 'contact':
-                func_items = results.get(GROUP_FUNCTIONS, [])
-                for item in func_items:
-                    if target in item.name:
-                        target_result = item
-                        break
-
-            if target_result:
-                break
-
-            logger.warning(
-                f"'{target}' not found in '{group_name}' group (attempt {attempt}/2)"
-            )
             self._clear_search()
             self._window.activate()
-            time.sleep(0.8)
+            delay = self._sleep_with_jitter(
+                SEARCH_RETRY_DELAY_MIN, SEARCH_RETRY_DELAY_MAX
+            )
+            logger.debug(
+                f"Open chat retry scheduled for '{target}' "
+                f"({attempt}/{SEARCH_RETRY_COUNT}, slept {delay:.2f}s)"
+            )
 
-        if not target_result:
-            logger.error(f"'{target}' not found in '{group_name}' group")
-            self._clear_search()
-            return False
-
-        # Click to open chat
-        logger.debug(f"Clicking: {target_result.name}")
-        target_result.ctrl.Click()
-        time.sleep(1)
-
-        # Verify chat input exists
-        chat_input = self._get_chat_input()
-        if not chat_input:
-            logger.error("Chat input not found after opening chat")
-            return False
-
-        logger.info(f"Chat opened: {target}")
-        return True
+        logger.error(f"Failed to open chat after retries: {target}")
+        self._clear_search()
+        return False
 
     def send_message(self, message: str) -> bool:
         """
@@ -337,15 +569,15 @@ class ChatWindow(BasePage):
         """
         logger.info(f"Sending message: {message[:20]}...")
 
-        chat_input = self._get_chat_input()
+        chat_input = self._prepare_chat_input_for_paste()
         if not chat_input:
-            logger.error("Chat input not found")
             return False
 
-        chat_input.Click()
-        time.sleep(OPERATION_INTERVAL)
-        chat_input.SendKeys('{Ctrl}a')
-        chat_input.SendKeys(message)
+        if not set_text_to_clipboard(message):
+            logger.error("Failed to write message to clipboard")
+            return False
+
+        self._send_ctrl_hotkey(VK_V)
         time.sleep(OPERATION_INTERVAL)
         chat_input.SendKeys('{Enter}')
         time.sleep(OPERATION_INTERVAL)
@@ -365,9 +597,40 @@ class ChatWindow(BasePage):
         Returns:
             bool: True if successful
         """
-        if not self.open_chat(target, target_type):
+        request = self._normalize_send_args(target, message, target_type)
+
+        if self._was_sent_recently(request.target, request.message):
+            logger.warning(
+                f"Skipping duplicate send within {SEND_DEDUP_WINDOW_SECONDS}s: {request.target}"
+            )
+            return True
+
+        initial_attempts = range(1, SEND_RETRY_COUNT + 1)
+        try:
+            if self._send_with_retry_range(request, initial_attempts):
+                return True
+        except TargetNotFoundError:
+            logger.error(f"Target chat not found: '{request.target}'")
             return False
-        return self.send_message(message)
+
+        if SEND_RECONNECT_RETRY_COUNT <= 0:
+            logger.error(f"Failed to send message to '{request.target}' after retries")
+            return False
+
+        self._rebuild_uia_session()
+        reconnect_attempts = range(
+            SEND_RETRY_COUNT + 1,
+            SEND_RETRY_COUNT + SEND_RECONNECT_RETRY_COUNT + 1,
+        )
+        try:
+            if self._send_with_retry_range(request, reconnect_attempts):
+                return True
+        except TargetNotFoundError:
+            logger.error(f"Target chat not found after reconnect: '{request.target}'")
+            return False
+
+        logger.error(f"Failed to send message to '{request.target}' after retries")
+        return False
 
     def batch_send(self, targets: List[str], message: str, target_type: str = 'group') -> Dict[str, bool]:
         """
@@ -384,12 +647,13 @@ class ChatWindow(BasePage):
         """
         logger.info(f"Batch sending to {len(targets)} targets")
 
+        normalized_message = self._normalize_message(message)
+
         results = {}
         for target in targets:
-            success = self.send_to(target, message, target_type)
+            success = self.send_to(target, normalized_message, target_type)
             results[target] = success
-            if success:
-                time.sleep(1)  # Interval between sends
+            self._sleep_between_batch_targets()
 
         # Summary
         success_count = sum(1 for v in results.values() if v)
@@ -401,6 +665,7 @@ class ChatWindow(BasePage):
     def last_search_results(self) -> Dict[str, List[SearchResult]]:
         """Get last search results"""
         return self._last_search_results
+
     def send_file(self, file_path, message: str = None) -> bool:
         """
         Send file in current chat.
@@ -412,23 +677,12 @@ class ChatWindow(BasePage):
         Returns:
             bool: True if successful
         """
-        import win32api
-        import win32con
-        from ..utils.clipboard_utils import set_files_to_clipboard
-
         logger.info(f"Sending file: {file_path}")
 
-        # Get chat input
-        chat_input = self._get_chat_input()
+        chat_input = self._prepare_chat_input_for_paste()
         if not chat_input:
-            logger.error("Chat input not found")
             return False
 
-        # Click to focus
-        chat_input.Click()
-        time.sleep(0.3)
-
-        # Set files to clipboard
         try:
             set_files_to_clipboard(file_path)
         except ValueError as e:
@@ -437,15 +691,7 @@ class ChatWindow(BasePage):
 
         time.sleep(0.2)
 
-        # Paste with Ctrl+V
-        VK_V = 0x56
-        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_V, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_V, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+        self._send_ctrl_hotkey(VK_V)
         time.sleep(0.5)
 
         # Add message if provided

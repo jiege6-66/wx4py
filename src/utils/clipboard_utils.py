@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Clipboard utilities for file operations"""
+"""Clipboard utilities for clipboard operations"""
 import os
 import struct
 import win32clipboard
@@ -71,4 +71,28 @@ def set_files_to_clipboard(file_paths):
         try:
             win32clipboard.CloseClipboard()
         except:
+            pass
+
+
+def set_text_to_clipboard(text: str) -> bool:
+    """
+    Set Unicode text to clipboard.
+
+    Args:
+        text: Text content
+
+    Returns:
+        bool: True if successful
+    """
+    try:
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
             pass

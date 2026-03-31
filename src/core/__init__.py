@@ -9,6 +9,7 @@ from .exceptions import (
     WeChatNotConnectedError,
     UIAError,
     ControlNotFoundError,
+    TargetNotFoundError,
     RegistryError,
 )
 
@@ -20,5 +21,6 @@ __all__ = [
     "WeChatNotConnectedError",
     "UIAError",
     "ControlNotFoundError",
+    "TargetNotFoundError",
     "RegistryError",
 ]

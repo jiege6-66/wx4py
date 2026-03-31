@@ -1,6 +1,6 @@
 [project]
 name = "wx4py"
-version = "0.1.2"
+dynamic = ["version"]
 description = "wx4py - Python 微信自动化工具"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,10 +24,10 @@ classifiers = [
 dependencies = [
     "pywin32>=305",
     "comtypes>=1.2.0",
-    "uiautomation",
     "pyperclip",
     "markdown",
     "beautifulsoup4",
+    "Pillow",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +48,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"wx4py" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "src._version.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

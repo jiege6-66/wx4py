@@ -9,8 +9,12 @@ import sys
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root / 'src'))
+sys.path.insert(0, str(project_root))
 
+# 使用库正式导入是这样的方式
+# from wx4py import WeChatClient
+
+# 拉取代码直接测试的话，IDE里使用这样的
 from src import WeChatClient
 
 
