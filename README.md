@@ -1,18 +1,26 @@
-<div align="center">
+<p align="center">
+  <img src="docs/images/logo.png" alt="wx4py" width="200">
+</p>
 
-<img src="docs/images/logo.png" alt="wx4py" width="200">
+<h1 align="center">wx4py</h1>
 
-# wx4py
+<p align="center"><strong>让微信4.x自动化变得简单</strong></p>
 
-**让微信4.x自动化变得简单**
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9+-blue" alt="Python Version"></a>
+  <a href="https://pypi.org/project/wx4py/"><img src="https://img.shields.io/pypi/v/wx4py.svg" alt="PyPI version"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License"></a>
+  <a href="https://www.microsoft.com/windows"><img src="https://img.shields.io/badge/platform-Windows%2010%7C11-lightgrey" alt="Platform"></a>
+  <a href="https://weixin.qq.com/"><img src="https://img.shields.io/badge/wechat-4.x-orange" alt="WeChat"></a>
+</p>
 
-[![Python Version](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/downloads/)
-[![PyPI version](https://img.shields.io/pypi/v/wx4py.svg)](https://pypi.org/project/wx4py/)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-green)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%7C11-lightgrey)](https://www.microsoft.com/windows)
-[![WeChat](https://img.shields.io/badge/wechat-4.x-orange)](https://weixin.qq.com/)
+<p align="center">
+  <a href="https://www.bilibili.com/video/BV1ms9FByEF1/">
+    <img src="docs/images/video_cover.png" alt="wx4py 视频演示" width="480">
+  </a>
+</p>
 
-</div>
+<p align="center">视频演示：点击上方封面查看 B 站视频 <code>BV1ms9FByEF1</code></p>
 
 ---
 
