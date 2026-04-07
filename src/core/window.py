@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """微信窗口管理"""
-import ctypes
-import ctypes.wintypes
 import time
-
-import win32gui
 
 from .uia_wrapper import UIAWrapper
 from .exceptions import WeChatNotFoundError
@@ -19,6 +15,7 @@ from ..utils.win32 import (
 )
 from ..utils.logger import get_logger
 from ..config import OPERATION_INTERVAL
+from . import uiautomation as uia
 
 logger = get_logger(__name__)
 
@@ -58,57 +55,6 @@ def _count_uia_descendants(ctrl, max_depth=4, limit=20):
     return count
 
 
-# WM_GETOBJECT 消息常量
-_WM_GETOBJECT = 0x003D
-_OBJID_CLIENT = 0xFFFFFFFC  # -4 的无符号表示
-
-# 唤醒尝试次数和每次等待时间（秒）
-# 增加尝试次数和等待时间以提高唤醒成功率
-_WAKE_ATTEMPTS = 5
-_WAKE_INTERVAL = 4
-
-
-def _force_broadcast_screen_reader_flag():
-    """无条件重新设置 SPI_SETSCREENREADER=1 并广播 WM_SETTINGCHANGE。
-
-    即使当前值已经是 1，也重新设置一次，
-    目的是让 Qt 收到 WM_SETTINGCHANGE 并重新评估辅助功能状态。
-    """
-    SPI_SETSCREENREADER = 0x0047
-    SPIF_SENDCHANGE = 0x02
-    ctypes.windll.user32.SystemParametersInfoW(
-        SPI_SETSCREENREADER, 1, 0, SPIF_SENDCHANGE
-    )
-
-
-def _send_wm_getobject(hwnd: int):
-    """向窗口及其所有子窗口发送 WM_GETOBJECT 消息。
-
-    Qt 在收到 WM_GETOBJECT(OBJID_CLIENT) 时会延迟初始化
-    辅助功能接口（QAccessible），即使启动时没有激活。
-    """
-    try:
-        ctypes.windll.user32.SendMessageW(
-            hwnd, _WM_GETOBJECT, 0, _OBJID_CLIENT
-        )
-    except Exception:
-        pass
-
-    def _enum_child(child_hwnd, _):
-        try:
-            ctypes.windll.user32.SendMessageW(
-                child_hwnd, _WM_GETOBJECT, 0, _OBJID_CLIENT
-            )
-        except Exception:
-            pass
-        return True
-
-    try:
-        win32gui.EnumChildWindows(hwnd, _enum_child, None)
-    except Exception:
-        pass
-
-
 class WeChatWindow:
     """微信窗口管理器"""
 
@@ -118,52 +64,120 @@ class WeChatWindow:
         self._uia: UIAWrapper = None
         self._initialized = False
 
-    def _try_wake_uia(self) -> bool:
-        """尝试唤醒微信的 UIA 辅助功能树，不重启微信。
+    def _try_click_login_button(self, hwnd: int) -> bool:
+        """
+        尝试在登录界面点击"进入微信"按钮。
 
-        通过以下步骤尝试触发 Qt 的辅助功能延迟初始化：
-        1. 强制重设 SPI_SETSCREENREADER=1 并广播 WM_SETTINGCHANGE
-        2. 向微信窗口及子窗口发送 WM_GETOBJECT 消息
-        3. 等待 Qt 处理后重新初始化 UIAWrapper
-        4. 如果首次不成功，重复多次
+        当微信重启后显示登录界面（非主界面）时，
+        尝试通过 UIA 查找并点击"进入微信"按钮。
+
+        Args:
+            hwnd: 微信窗口句柄
 
         Returns:
-            bool: 唤醒成功（UIA 控件树可用）返回 True
+            bool: 成功点击按钮返回 True
         """
-        logger.info("尝试唤醒微信 UIA 辅助功能（不重启微信）...")
+        try:
+            # 尝试获取窗口的 UIA 控件
+            root = uia.ControlFromHandle(hwnd)
+            if not root:
+                return False
 
-        for attempt in range(1, _WAKE_ATTEMPTS + 1):
-            # 步骤1：尝试激活窗口以触发辅助功功能初始化
-            try:
-                bring_window_to_front(self._hwnd)
-                time.sleep(0.3)
-            except Exception:
-                pass
+            # 查找名称包含"进入微信"的按钮
+            # 使用递归搜索查找所有子按钮
+            def find_button(ctrl, depth=0):
+                if depth > 10:  # 限制搜索深度（按钮可能在第8层）
+                    return None
 
-            # 步骤2：强制广播 SPI 变更通知
-            _force_broadcast_screen_reader_flag()
-            time.sleep(0.5)
+                # 检查当前控件是否是按钮
+                try:
+                    if ctrl.ControlTypeName == 'ButtonControl':
+                        name = ctrl.Name or ""
+                        if '进入微信' in name:
+                            logger.debug(f"找到'进入微信'按钮，深度={depth}")
+                            return ctrl
+                except Exception:
+                    pass
 
-            # 步骤3：发送 WM_GETOBJECT 触发 Qt 延迟初始化
-            _send_wm_getobject(self._hwnd)
-            time.sleep(_WAKE_INTERVAL)
+                # 递归搜索子控件
+                try:
+                    children = ctrl.GetChildren()
+                    for child in children:
+                        result = find_button(child, depth + 1)
+                        if result:
+                            return result
+                except Exception:
+                    pass
 
-            # 重新绑定 UIA 并检查
-            try:
-                self._uia = UIAWrapper(self._hwnd)
-                node_count = _count_uia_descendants(self._uia.root)
-                logger.debug(
-                    f"唤醒尝试 {attempt}/{_WAKE_ATTEMPTS}: "
-                    f"UIA 节点数={node_count}"
-                )
-                if node_count >= _MIN_UIA_TREE_NODES:
-                    logger.info("UIA 唤醒成功，无需重启微信")
+                return None
+
+            button = find_button(root)
+            if button:
+                logger.info("检测到登录界面，尝试点击'进入微信'按钮...")
+                try:
+                    # 尝试多种点击方式
+                    try:
+                        button.Click()
+                    except Exception:
+                        try:
+                            button.Click(simulateMove=False)
+                        except Exception:
+                            # 回退：尝试获取按钮位置并直接点击
+                            try:
+                                rect = button.BoundingRectangle
+                                if rect:
+                                    import win32api
+                                    import win32con
+                                    x = (rect.left + rect.right) // 2
+                                    y = (rect.top + rect.bottom) // 2
+                                    win32api.SetCursorPos((x, y))
+                                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                                    time.sleep(0.1)
+                                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                            except Exception:
+                                pass
+
+                    logger.info("已点击'进入微信'按钮，等待登录完成...")
                     return True
-            except Exception as e:
-                logger.debug(f"唤醒尝试 {attempt} 异常: {e}")
+                except Exception as e:
+                    logger.debug(f"点击登录按钮失败: {e}")
+                    return False
 
-        logger.warning("UIA 唤醒失败，微信辅助功能未响应")
-        return False
+            return False
+        except Exception as e:
+            logger.debug(f"尝试点击登录按钮异常: {e}")
+            return False
+
+    def _wait_for_main_window(self, timeout: int = 30):
+        """等待微信主窗口出现。
+
+        点击"进入微信"按钮后，微信会从登录窗口切换到主窗口，
+        HWND 会改变，需要重新查找并绑定。
+
+        Args:
+            timeout: 最大等待时间（秒）
+        """
+        logger.info("等待微信主窗口出现...")
+        for i in range(timeout):
+            time.sleep(1)
+            hwnd = find_wechat_window()
+            if hwnd:
+                cls = get_window_class(hwnd)
+                if 'MainWindow' in cls:
+                    logger.info(f"主窗口已出现: HWND={hwnd}")
+                    self._hwnd = hwnd
+                    bring_window_to_front(hwnd)
+                    time.sleep(1)
+                    return
+                if i % 5 == 0:
+                    logger.debug(f"等待登录完成... 当前窗口: {cls}")
+        # 超时后尝试接受任何微信窗口
+        hwnd = find_wechat_window()
+        if hwnd:
+            self._hwnd = hwnd
+            logger.warning(f"未检测到 MainWindow，使用当前窗口: HWND={hwnd}")
+        else:
+            logger.warning("等待主窗口超时")
 
     def _restart_and_reconnect(self):
         """重启微信并等待重新连接。
@@ -185,10 +199,11 @@ class WeChatWindow:
             )
 
         # 等待微信**主窗口**出现（最多等待 60 秒）
-        # 微信重启后先出现 LoginWindow（自动登录中），
-        # 登录完成后才会变为 MainWindow，HWND 也会改变。
+        # 微信重启后先出现 LoginWindow（登录界面），
+        # 点击"进入微信"后才会变为 MainWindow，HWND 也会改变。
         logger.info("微信已重启，等待主窗口出现...")
         hwnd = None
+        login_clicked = False
         for i in range(60):
             time.sleep(1)
             hwnd = find_wechat_window()
@@ -197,6 +212,13 @@ class WeChatWindow:
                 if 'MainWindow' in cls:
                     logger.debug(f"检测到主窗口: HWND={hwnd}, ClassName={cls}")
                     break
+                # 检测是否是登录界面（非主窗口但是微信窗口）
+                if not login_clicked and ('Login' in cls or 'Qt' in cls):
+                    # 尝试点击"进入微信"按钮
+                    if self._try_click_login_button(hwnd):
+                        login_clicked = True
+                        # 点击后继续等待，不重置 hwnd
+                        continue
                 # 仍然是登录窗口，继续等待
                 if i % 5 == 0:
                     logger.debug(f"等待登录完成... 当前窗口: {cls}")
@@ -222,16 +244,13 @@ class WeChatWindow:
         # 重新初始化 UIA，并多次重试健康检查
         # 微信登录完成后 Qt 可能需要额外时间来完全初始化 UIA 控件树
         node_count = 0
-        for check in range(5):
+        for check in range(10):
             self._uia = UIAWrapper(self._hwnd)
             node_count = _count_uia_descendants(self._uia.root)
-            logger.debug(f"重启后 UIA 健康检查 ({check + 1}/5): 节点数={node_count}")
+            logger.debug(f"重启后 UIA 健康检查 ({check + 1}/10): 节点数={node_count}")
             if node_count >= _MIN_UIA_TREE_NODES:
                 return
-            # 尝试唤醒并等待
-            _force_broadcast_screen_reader_flag()
-            _send_wm_getobject(self._hwnd)
-            time.sleep(3)
+            time.sleep(2)
 
         raise WeChatNotFoundError(
             f"微信重启后 UIA 控件树仍然为空（{node_count} 个节点）。"
@@ -307,32 +326,36 @@ class WeChatWindow:
             logger.info("成功连接到微信（重启后）")
             return True
 
-        # 第6步：初始化 UIAutomation
+        # 第6步：检测是否在登录界面
+        # 微信 UIA 失效后重新运行时，窗口可能仍显示登录界面，
+        # 需要先点击"进入微信"按钮完成登录。
+        cls = get_window_class(self._hwnd)
+        if 'MainWindow' not in cls:
+            logger.info(f"当前窗口不是主窗口（ClassName={cls}），检查是否在登录界面...")
+            if self._try_click_login_button(self._hwnd):
+                # 成功点击登录按钮，等待主窗口出现
+                self._wait_for_main_window()
+
+        # 第7步：初始化 UIAutomation
         logger.info("正在初始化 UIAutomation...")
         self._uia = UIAWrapper(self._hwnd)
 
-        # 第7步：UIA 健康检查
+        # 第8步：UIA 健康检查
         # Qt 辅助功能仅在进程启动时根据 SPI_GETSCREENREADER 标志初始化。
         # 如果微信在标志关闭时已经启动，即使之后标志开启了，
-        # 当前进程的控件树仍然可能为空。
-        # 策略：先尝试通过 WM_GETOBJECT + WM_SETTINGCHANGE 唤醒，
-        #        唤醒失败才重启微信。
+        # 当前进程的控件树仍然会为空。
+        # 根据实测：唤醒机制（WM_GETOBJECT + SPI 广播）在微信 UIA 失效后无法可靠恢复，
+        # 必须重启微信进程才能重新初始化 Qt 辅助功功能。
+        # 建议用户启用微信自动登录以实现无人值守。
         node_count = _count_uia_descendants(self._uia.root)
         logger.debug(f"UIA 健康检查: 控件树节点数={node_count}")
         if node_count < _MIN_UIA_TREE_NODES:
             logger.warning(
-                f"UIA 控件树几乎为空（仅 {node_count} 个节点），"
-                "尝试唤醒微信辅助功能..."
+                f"UIA 控件树几乎为空（仅 {node_count} 个节点）。"
+                "微信进程的辅助功功能已失效，必须重启才能恢复。"
+                "正在重启微信（建议启用微信自动登录以实现无人值守）..."
             )
-            # 先尝试唤醒，不重启
-            if not self._try_wake_uia():
-                # 唤醒失败，必须重启微信
-                logger.warning("UIA 唤醒失败，微信可能在屏幕阅读器启用前就已启动，正在重启微信...")
-                try:
-                    ensure_screen_reader_flag()
-                except Exception:
-                    pass
-                self._restart_and_reconnect()
+            self._restart_and_reconnect()
 
         self._initialized = True
         logger.info("成功连接到微信")
