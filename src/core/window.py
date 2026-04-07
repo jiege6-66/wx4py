@@ -148,7 +148,7 @@ class WeChatWindow:
             logger.debug(f"尝试点击登录按钮异常: {e}")
             return False
 
-    def _wait_for_main_window(self, timeout: int = 30):
+    def _wait_for_main_window(self, timeout: int = 20):
         """等待微信主窗口出现。
 
         点击"进入微信"按钮后，微信会从登录窗口切换到主窗口，
@@ -159,7 +159,7 @@ class WeChatWindow:
         """
         logger.info("等待微信主窗口出现...")
         for i in range(timeout):
-            time.sleep(1)
+            time.sleep(0.5)  # 缩短检测间隔
             hwnd = find_wechat_window()
             if hwnd:
                 cls = get_window_class(hwnd)
@@ -167,9 +167,9 @@ class WeChatWindow:
                     logger.info(f"主窗口已出现: HWND={hwnd}")
                     self._hwnd = hwnd
                     bring_window_to_front(hwnd)
-                    time.sleep(1)
+                    time.sleep(0.3)
                     return
-                if i % 5 == 0:
+                if i % 10 == 0:
                     logger.debug(f"等待登录完成... 当前窗口: {cls}")
         # 超时后尝试接受任何微信窗口
         hwnd = find_wechat_window()
@@ -198,13 +198,15 @@ class WeChatWindow:
                 "请手动重启微信后重试。"
             )
 
-        # 等待微信**主窗口**出现（最多等待 60 秒）
+        # 等待微信主窗口出现（最多等待 30 秒）
         # 微信重启后先出现 LoginWindow（登录界面），
         # 点击"进入微信"后才会变为 MainWindow，HWND 也会改变。
         logger.info("微信已重启，等待主窗口出现...")
         hwnd = None
         login_clicked = False
-        for i in range(60):
+        login_button_clicked_at = None
+        
+        for i in range(30):
             time.sleep(1)
             hwnd = find_wechat_window()
             if hwnd:
@@ -217,6 +219,7 @@ class WeChatWindow:
                     # 尝试点击"进入微信"按钮
                     if self._try_click_login_button(hwnd):
                         login_clicked = True
+                        login_button_clicked_at = i
                         # 点击后继续等待，不重置 hwnd
                         continue
                 # 仍然是登录窗口，继续等待
@@ -233,10 +236,9 @@ class WeChatWindow:
                 "微信已重启但主窗口未出现，请确认微信已登录后重试。"
             )
 
-        # 等待窗口完全加载
-        time.sleep(3)
+        # 等待窗口稳定
         bring_window_to_front(hwnd)
-        time.sleep(1)
+        time.sleep(0.5)
 
         self._hwnd = hwnd
         logger.info(f"微信重启完成，新窗口: HWND={hwnd}")
@@ -250,7 +252,7 @@ class WeChatWindow:
             logger.debug(f"重启后 UIA 健康检查 ({check + 1}/10): 节点数={node_count}")
             if node_count >= _MIN_UIA_TREE_NODES:
                 return
-            time.sleep(2)
+            time.sleep(0.5)  # 缩短等待间隔
 
         raise WeChatNotFoundError(
             f"微信重启后 UIA 控件树仍然为空（{node_count} 个节点）。"
