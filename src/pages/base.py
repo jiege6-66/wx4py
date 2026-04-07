@@ -2,6 +2,7 @@
 """微信 UI 页面基类"""
 import time
 from ..config import OPERATION_INTERVAL
+from ..utils.win32 import minimize_window
 
 
 class BasePage:
@@ -34,3 +35,13 @@ class BasePage:
     def find_control(self, control_type: str = None, **kwargs):
         """查找控件"""
         return self.uia.find_control(control_type, **kwargs)
+
+    def _minimize_window(self) -> bool:
+        """最小化微信窗口，保护用户隐私"""
+        try:
+            hwnd = self._window.hwnd
+            if hwnd:
+                return minimize_window(hwnd)
+        except Exception:
+            pass
+        return False

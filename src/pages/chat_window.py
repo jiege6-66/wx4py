@@ -948,6 +948,7 @@ class ChatWindow(BasePage):
         time.sleep(0.3)
 
         logger.info("消息已发送")
+        self._minimize_window()
         return True
 
     def send_to(self, target: str, message: str, target_type: str = 'contact') -> bool:
@@ -1006,6 +1007,9 @@ class ChatWindow(BasePage):
         success_count = sum(1 for v in results.values() if v)
         logger.info(f"批量发送完成: {success_count}/{len(targets)} 成功")
 
+        if success_count > 0:
+            self._minimize_window()
+
         return results
 
     @property
@@ -1052,6 +1056,7 @@ class ChatWindow(BasePage):
         time.sleep(0.5)
 
         logger.info("文件已发送")
+        self._minimize_window()
         return True
 
     def _set_files_to_clipboard(self, file_path) -> bool:

@@ -269,3 +269,20 @@ def get_window_class(hwnd: int) -> str:
 def is_window_visible(hwnd: int) -> bool:
     """检查窗口是否可见"""
     return win32gui.IsWindowVisible(hwnd) != 0
+
+
+def minimize_window(hwnd: int) -> bool:
+    """
+    最小化指定窗口。
+
+    Args:
+        hwnd: 窗口句柄
+
+    Returns:
+        bool: 成功时返回 True
+    """
+    try:
+        win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+        return True
+    except Exception:
+        return False

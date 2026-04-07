@@ -579,6 +579,7 @@ class GroupManager(BasePage):
             return False
 
         logger.info(f"群公告修改成功: {group_name}")
+        self._minimize_window()
         return True
 
     def modify_announcement(self, group_name: str, announcement: str) -> bool:
@@ -718,6 +719,7 @@ class GroupManager(BasePage):
         confirm_btn.Click()
         logger.info(f"群昵称已设置为 '{nickname}'")
         time.sleep(1)
+        self._minimize_window()
         return True
 
     def _set_toggle_in_detail_panel(self, group_name: str, control_name: str, enable: bool) -> bool:
@@ -763,6 +765,7 @@ class GroupManager(BasePage):
                 return False
 
         logger.info(f"'{control_name}' set to {'开启' if enable else '关闭'} successfully")
+        self._minimize_window()
         return True
 
     def set_do_not_disturb(self, group_name: str, enable: bool) -> bool:
