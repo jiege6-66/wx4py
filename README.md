@@ -15,12 +15,12 @@
 </p>
 
 <p align="center">
-  <a href="./docs/videos/wx4py-demo.mp4">
+  <a href="https://wx4py.biglongxia.com/">
     <img src="docs/images/video_cover.png" alt="wx4py 视频演示" width="480">
   </a>
 </p>
 
-<p align="center">视频演示：点击上方封面查看本地演示视频 <code>docs/videos/wx4py-demo.mp4</code></p>
+<p align="center">视频演示：点击上方封面前往官网查看</p>
 
 ---
 
@@ -310,6 +310,8 @@ wx4py 模拟真实用户操作，不修改微信客户端。但仍建议：
 感谢 [linux.do 社区](https://linux.do/) 中相关讨论带来的启发，让这个项目的方向和落地方式逐步清晰起来。
 
 同时也感谢 [wxauto](https://github.com/cluic/wxauto) 项目提供的思路参考，为本项目的实现带来了帮助。
+
+也感谢 [yeafel666](https://github.com/yeafel666) 对窗口连接、搜索体验和最小化能力等改进所做的贡献。
 
 ---
 
