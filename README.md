@@ -216,6 +216,8 @@ with WeChatClient() as wx:
 
 如果你是开发者，想查看更多调用示例，请参考 [examples/](./examples/) 目录。
 
+如果你要提交 Issue，请尽量提供微信版本号、wx4py 版本号、详细复现步骤，并附上相关截图或日志，便于定位问题。
+
 ---
 
 ## AI Skill 快速使用
