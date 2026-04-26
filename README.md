@@ -212,6 +212,32 @@ with WeChatClient(auto_connect=True) as wx:
 
 ---
 
+### 实时监听联系人消息（区分收发）
+
+```python
+from wx4py import MessageStore, WeChatClient
+
+store = MessageStore(max_per_contact=200)
+
+def on_msg(event):
+    who = "我" if event.sender == "me" else "对方"
+    print(f"[{who}] {event.content}")
+
+with WeChatClient(auto_connect=True) as wx:
+    listener = wx.monitor_contacts(
+        ["张三"],
+        store=store,
+        on_message=on_msg,
+    )
+    # 监听中也可以用 listener.send() 发消息
+    listener.send("张三", "你在吗？")
+    listener.run_forever()  # 持续监听直到 Ctrl+C
+```
+
+**效果**：实时监听 1v1 联系人聊天，自动区分"我"和"对方"的消息，记录精确时间戳，`MessageStore` 按联系人存储完整历史。
+
+---
+
 ### 更多便捷操作
 
 | 你想做的事 | 一行代码 |
@@ -227,6 +253,8 @@ with WeChatClient(auto_connect=True) as wx:
 | 监听/处理多个群聊 | `wx.process_groups(["群1"], [handler], block=True)` |
 | 监听群消息并转发 | `wx.process_groups(["群1"], [ForwardRuleHandler(rules)], block=True)` |
 | @ 触发 AI 自动回复 | `wx.process_groups(["群1"], [AsyncCallbackHandler(AIResponder(ai, reply_on_at=True), auto_reply=True)], block=True)` |
+| 监听联系人消息 | `wx.monitor_contacts(["张三"], store=store, on_message=on_msg)` |
+| 监听中发消息 | `listener.send("张三", "你好")` |
 
 ---
 

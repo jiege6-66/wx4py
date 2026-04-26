@@ -46,12 +46,19 @@ TIME_CLASS = "mmui::ChatItemView"
 class MessageEvent:
     """监听到的新消息。"""
 
-    group: str
+    source: str
     content: str
     timestamp: float
-    group_nickname: Optional[str] = None
+    sender: str = ""
+    source_type: str = ""
+    source_nickname: Optional[str] = None
     is_at_me: bool = False
     raw: object = None
+
+    @property
+    def group(self) -> str:
+        """向后兼容别名。"""
+        return self.source
 
 
 @dataclass(frozen=True)
@@ -356,6 +363,36 @@ def _double_click_control(control) -> bool:
         return True
     except Exception:
         return False
+
+
+def _detect_sender(control, msg_list) -> str:
+    """通过 BoundingRectangle 判断消息方向。
+
+    在 1v1 聊天中，收到的消息左对齐，发出的消息右对齐。
+    适用于 contact 和 group 聊天窗口。
+
+    Returns:
+        "me" | "them" | ""
+    """
+    try:
+        ctrl_rect = control.BoundingRectangle
+        list_rect = msg_list.BoundingRectangle
+        if not ctrl_rect or not list_rect:
+            return ""
+        list_width = list_rect.right - list_rect.left
+        if list_width <= 0:
+            return ""
+        ctrl_center = (ctrl_rect.left + ctrl_rect.right) / 2
+        relative = (ctrl_center - list_rect.left) / list_width
+        if relative < 0.45:
+            return "them"
+        if relative > 0.55:
+            return "me"
+        return ""
+    except Exception:
+        return ""
+
+
 class WeChatGroupListener:
     """微信群聊监听器。"""
 
@@ -545,11 +582,14 @@ class WeChatGroupListener:
         self._update_next_scan(session, added)
 
     def _handle_message(self, session: _ListenSession, item: _VisibleItem) -> None:
+        sender = _detect_sender(item.control, session.msg_list) if item.control else ""
         event = MessageEvent(
-            group=session.group,
+            source=session.group,
             content=item.name,
             timestamp=time.time(),
-            group_nickname=self.group_nicknames.get(session.group),
+            sender=sender,
+            source_type="group",
+            source_nickname=self.group_nicknames.get(session.group),
             is_at_me=self._is_at_me(session.group, item.name),
             raw=item.control,
         )
@@ -680,3 +720,228 @@ class WeChatGroupListener:
             return None
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
+
+
+class ContactMessageListener:
+    """联系人消息监听器。
+
+    复用底层 UIA 操作函数（_find_message_list、_read_visible_items 等），
+    对 1v1 联系人聊天进行轻量实时监听。通过 BoundingRectangle 判断消息方向，
+    自动区分 "me"（自己发出）和 "them"（对方发出）。
+
+    用法:
+        store = MessageStore()
+        listener = ContactMessageListener(
+            wx, ["文件传输助手", "张三"],
+            store=store,
+        )
+        listener.start()
+        # ... 开始监听 ...
+        listener.stop()
+        # 读取记录
+        for msg in store.get("文件传输助手"):
+            print(f"[{msg['sender']}] {msg['content']}")
+    """
+
+    def __init__(
+        self,
+        client,
+        contacts: Iterable[str],
+        *,
+        store=None,
+        on_message: Optional[Callable[[MessageEvent], None]] = None,
+        ignore_client_sent: bool = True,
+        outgoing_ttl: float = 60.0,
+        tick: float = 0.1,
+        tail_size: int = 8,
+    ):
+        self.client = client
+        self.contacts = list(dict.fromkeys(contacts))
+        self.store = store
+        self.on_message = on_message
+        self.ignore_client_sent = ignore_client_sent
+        self.tick = tick
+        self.tail_size = tail_size
+
+        shared_registry = getattr(self.client, "outgoing_registry", None)
+        self.outgoing_registry = shared_registry or OutgoingMessageRegistry(outgoing_ttl)
+        self.sessions: Dict[str, _ListenSession] = {}
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def send(self, contact: str, content: str) -> bool:
+        """发送消息并自动注册，确保监听时能被识别为本方消息。"""
+        self.outgoing_registry.record(contact, content)
+        session = self.sessions.get(contact)
+        if session:
+            edit = WeChatGroupListener._find_chat_input(session.root)
+            if edit:
+                return ChatWindow.send_text_via_input(
+                    edit, content,
+                    clipboard_error="写入剪贴板失败",
+                    send_error="发送失败",
+                )
+        return False
+
+    def start(self, block: bool = False) -> "ContactMessageListener":
+        self._open_sessions()
+        self._stop_event.clear()
+        if block:
+            try:
+                self._run_loop()
+            finally:
+                self.stop()
+        else:
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def run_forever(self) -> None:
+        try:
+            if not self.is_running:
+                self.start(block=True)
+            while not self._stop_event.is_set():
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.stop()
+
+    def _open_sessions(self) -> None:
+        for contact in self.contacts:
+            if contact in self.sessions:
+                continue
+            if not self.client.chat_window.open_chat(contact, target_type="contact"):
+                raise RuntimeError(f"打开联系人聊天失败: {contact}")
+            time.sleep(0.8)
+
+            hwnd = self.client.window.hwnd
+            root = self.client.window.uia.root
+            msg_list = _find_message_list(root)
+            if not msg_list:
+                raise RuntimeError(f"未找到聊天消息列表: {contact}")
+            baseline = _read_visible_items(msg_list)
+            self.sessions[contact] = _ListenSession(
+                group=contact,
+                hwnd=hwnd,
+                root=root,
+                msg_list=msg_list,
+                seen={item.key for item in baseline},
+            )
+
+    def _run_loop(self) -> None:
+        logger.info(f"开始监听联系人: {', '.join(self.contacts)}")
+        while not self._stop_event.is_set():
+            now = time.time()
+            for session in self._due_sessions(now):
+                self._poll_session(session)
+            time.sleep(self.tick)
+        logger.info("联系人监听已停止")
+
+    def _due_sessions(self, now: float) -> List[_ListenSession]:
+        sessions = [
+            session for session in self.sessions.values()
+            if session.next_scan_at <= now
+        ]
+        sessions.sort(key=lambda session: session.next_scan_at)
+        return sessions
+
+    def _poll_session(self, session: _ListenSession) -> None:
+        session.scan_count += 1
+        try:
+            # 每次轮询重新获取 msg_list，避免 UIA 树重建导致引用过期
+            session.root = self.client.window.uia.root
+            msg_list = _find_message_list(session.root)
+            if msg_list:
+                session.msg_list = msg_list
+            items = _read_visible_items(session.msg_list)
+            if self.tail_size > 0:
+                items = items[-self.tail_size:]
+        except Exception as exc:
+            session.fail_count += 1
+            logger.debug(f"读取消息失败: {session.group}: {exc}")
+            return
+
+        new_key_count = 0
+        added = 0
+        for item in items:
+            if item.key in session.seen:
+                continue
+            new_key_count += 1
+            session.seen.add(item.key)
+            if item.kind != "message":
+                continue
+
+            from_self = (
+                self.ignore_client_sent
+                and self.outgoing_registry.should_ignore(session.group, item.name)
+            )
+            sender = "me" if from_self else (
+                _detect_sender(item.control, session.msg_list) if item.control else ""
+            ) or "them"
+
+            if from_self:
+                self._record_if_store(session, item, sender)
+                continue
+
+            added += 1
+            session.new_count += 1
+            self._handle_message(session, item, sender)
+
+        self._update_next_scan(session, added)
+
+    def _record_if_store(self, session: _ListenSession, item: _VisibleItem, sender: str) -> None:
+        if self.store is not None:
+            self.store.record(
+                contact=session.group,
+                content=item.name,
+                sender=sender,
+                timestamp=time.time(),
+            )
+
+    def _update_next_scan(self, session: _ListenSession, added: int) -> None:
+        now = time.time()
+        if added:
+            session.last_message_at = now
+            session.interval = 0.3
+        else:
+            idle_for = now - session.last_message_at
+            if idle_for >= 120:
+                session.interval = 3.0
+            elif idle_for >= 30:
+                session.interval = 1.0
+            else:
+                session.interval = 0.3
+        session.next_scan_at = now + session.interval
+
+    def _handle_message(self, session: _ListenSession, item: _VisibleItem, sender: str) -> None:
+        event = MessageEvent(
+            source=session.group,
+            content=item.name,
+            timestamp=time.time(),
+            sender=sender,
+            source_type="contact",
+            raw=item.control,
+        )
+
+        if self.store is not None:
+            self.store.record(
+                contact=session.group,
+                content=item.name,
+                sender=sender,
+                timestamp=event.timestamp,
+            )
+
+        if self.on_message:
+            try:
+                self.on_message(event)
+            except Exception as exc:
+                logger.debug(f"消息回调执行失败: {session.group}: {exc}")
+

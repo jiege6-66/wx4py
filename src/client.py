@@ -4,11 +4,14 @@ wx4py 客户端
 
 wx4py 的主入口。
 """
+from typing import Iterable, Optional
+
 from .core.exceptions import WeChatNotFoundError
 from .core.window import WeChatWindow
 from .features.chat import ChatWindow
 from .features.groups import GroupManager
-from .features.messaging.listener import OutgoingMessageRegistry
+from .features.messaging.history import MessageStore
+from .features.messaging.listener import ContactMessageListener, OutgoingMessageRegistry
 from .features.messaging.processor import MessageHandler, WeChatGroupProcessor
 from .utils.logger import get_logger
 
@@ -151,6 +154,40 @@ class WeChatClient:
     def outgoing_registry(self) -> OutgoingMessageRegistry:
         """获取客户端级共享的已发送消息注册表。"""
         return self._outgoing_registry
+
+    def monitor_contacts(
+        self,
+        contacts: Iterable[str],
+        *,
+        store: Optional[MessageStore] = None,
+        on_message=None,
+        block: bool = False,
+        **options,
+    ) -> ContactMessageListener:
+        """实时监听联系人的聊天消息。
+
+        Args:
+            contacts: 联系人名称列表。
+            store: 可选的 MessageStore 实例，用于持久化消息历史。
+            on_message: 可选的回调函数，接收 MessageEvent。
+            block: 是否阻塞当前线程。
+            **options: 传给 ContactMessageListener 的参数。
+
+        Returns:
+            ContactMessageListener 实例。
+        """
+        if not self.is_connected:
+            self.connect()
+
+        listener = ContactMessageListener(
+            self,
+            contacts,
+            store=store,
+            on_message=on_message,
+            **options,
+        )
+        self._services.append(listener)
+        return listener.start(block=block)
 
     def __enter__(self):
         """上下文管理器入口"""

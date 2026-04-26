@@ -37,6 +37,7 @@ htmlcov/
 
 # Logs
 *.log
+*.jsonl
 
 # Scripts output
 scripts/*.json

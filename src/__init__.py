@@ -14,7 +14,8 @@ from .features.messaging.forwarder import (
     ForwardTarget,
     GroupForwardRule,
 )
-from .features.messaging.listener import MessageEvent, WeChatGroupListener
+from .features.messaging.history import MessageStore
+from .features.messaging.listener import ContactMessageListener, MessageEvent, WeChatGroupListener
 from .features.messaging.processor import (
     AsyncCallbackHandler,
     CallbackHandler,
@@ -42,6 +43,7 @@ __all__ = [
     "AIResponder",
     "MessageEvent",
     "WeChatGroupListener",
+    "ContactMessageListener",
     "MessageAction",
     "ReplyAction",
     "ForwardAction",
@@ -53,6 +55,7 @@ __all__ = [
     "ForwardPayload",
     "GroupForwardRule",
     "ForwardRuleHandler",
+    "MessageStore",
     "WeChatError",
     "WeChatNotFoundError",
     "WeChatNotConnectedError",

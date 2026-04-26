@@ -7,7 +7,8 @@ from .forwarder import (
     ForwardTarget,
     GroupForwardRule,
 )
-from .listener import MessageEvent, WeChatGroupListener
+from .history import MessageStore
+from .listener import ContactMessageListener, MessageEvent, WeChatGroupListener
 from .processor import (
     AsyncCallbackHandler,
     CallbackHandler,
@@ -21,6 +22,7 @@ from .processor import (
 __all__ = [
     "MessageEvent",
     "WeChatGroupListener",
+    "ContactMessageListener",
     "MessageAction",
     "ReplyAction",
     "ForwardAction",
@@ -32,4 +34,5 @@ __all__ = [
     "ForwardPayload",
     "GroupForwardRule",
     "ForwardRuleHandler",
+    "MessageStore",
 ]
