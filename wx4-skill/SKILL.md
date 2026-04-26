@@ -378,6 +378,66 @@ with WeChatClient(auto_connect=True) as wx:
 - 自动回复通过发送队列串行执行，避免多个群同时回复时抢占窗口。
 - 本库发送的消息会自动记录，避免机器人监听到自己的回复后再次触发。
 
+### 6. 联系人消息实时监听（区分收发）
+
+#### 监听单个联系人的聊天
+
+```python
+from wx4py import MessageStore, WeChatClient
+
+store = MessageStore(max_per_contact=200)
+
+def on_msg(event):
+    # event.sender: "me" = 自己发的, "them" = 对方发的
+    who = "我" if event.sender == "me" else "对方"
+    print(f"[{who}] {event.content}")
+
+with WeChatClient(auto_connect=True) as wx:
+    wx.monitor_contacts(
+        ["张三"],
+        store=store,
+        on_message=on_msg,
+        block=True,
+    )
+```
+
+#### 监听中发送消息并读取历史
+
+```python
+from wx4py import MessageStore, WeChatClient
+
+store = MessageStore(max_per_contact=200)
+
+with WeChatClient(auto_connect=True) as wx:
+    listener = wx.monitor_contacts(
+        ["张三"],
+        store=store,
+    )
+
+    # 发送消息时自动注册，保证被识别为 sender="me"
+    listener.send("张三", "你在干嘛？")
+
+    # 持续监听一段时间...
+    import time
+    time.sleep(30)
+
+    # 读取这个联系人的完整聊天记录
+    for msg in store.get("张三"):
+        who = "我" if msg["sender"] == "me" else "对方"
+        print(f"[{who}] {msg['content']}")
+```
+
+**适用场景**：
+- 监控特定联系人的消息，自动区分发送者
+- 获取联系人聊天的完整时间线
+- 配合 AI 回调做 1v1 自动回复
+
+**实现说明**：
+- 1v1 聊天通过主窗口轮询，不需要独立子窗口
+- 发送者识别通过发送注册表 + BoundingRectangle 双重判断
+- `MessageStore` 按联系人存储，deque 最大长度防止内存溢出
+- `listener.send()` 会先注册再发送，确保消息被标记为 "me"
+
 ## 使用模式
 
 ### 推荐：使用上下文管理器
@@ -538,6 +598,9 @@ except Exception as e:
 | 监听群消息并转发 | `process_groups(groups, [ForwardRuleHandler(rules)], block=True)` | `wx.process_groups(["群1"], [ForwardRuleHandler(rules)], block=True)` |
 | 自动回复群聊 | `AsyncCallbackHandler(reply_func, auto_reply=True)` | `AsyncCallbackHandler(reply, auto_reply=True, reply_on_at=True)` |
 | AI 自动回复 | `AIResponder(ai_client, context_size=8)` | `AsyncCallbackHandler(AIResponder(ai, context_size=8, reply_on_at=True), auto_reply=True)` |
+| 监听联系人 | `wx.monitor_contacts(["张三"], store=store, on_message=fn)` | `wx.monitor_contacts(["张三"], store=store, on_message=on_msg)` |
+| 监听中发消息 | `listener.send("张三", "你好")` | `listener.send("张三", "你好")` |
+| 读取联系人历史 | `store.get("张三")` | `store.get("张三")` |
 
 ## 常见问题
 
